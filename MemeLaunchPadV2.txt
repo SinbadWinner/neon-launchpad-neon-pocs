@@ -1,0 +1,65 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.28;
+
+// ... (all imports and code up to the `buy` function remain the same)
+
+    /// @notice Buys tokens during the funding phase. If funding goal is reached, creates Raydium pool
+    /// @param tokenAddress Address of the token to buy
+    /// @param amount Amount of WSOL to spend
+    function buy(
+        address tokenAddress,
+        uint64 amount
+    ) external nonReentrant {
+        require(tokens[tokenAddress].state == TokenState.FUNDING, InvalidTokenSale());
+        require(amount > 0, InvalidInputAmount());
+
+        uint64 leftToFundingGoal = tokens[tokenAddress].fundingGoal - tokens[tokenAddress].collateralAmount;
+        uint64 contributionWithoutFee = _amountWithoutFee(amount);
+
+        if (contributionWithoutFee > leftToFundingGoal) {
+            amount = leftToFundingGoal + (leftToFundingGoal * feePercent) / FEE_DENOMINATOR;
+            contributionWithoutFee = leftToFundingGoal;
+        }
+
+        uint64 _fee = amount - contributionWithoutFee;
+        fee += _fee;
+
+        wsolToken.transferFrom(msg.sender, address(this), amount);
+
+        IERC20ForSpl token = IERC20ForSpl(tokenAddress);
+        tokens[tokenAddress].collateralAmount += contributionWithoutFee;
+
+        // 🔥 New logic - early buyers get a bonus
+        uint64 progressPercent = (tokens[tokenAddress].collateralAmount * 100) / tokens[tokenAddress].fundingGoal;
+        if (progressPercent > 100) progressPercent = 100; // overflow protectionя
+
+        uint64 bonusMultiplier = 120 - progressPercent; // от 120% до 20%
+
+        uint256 baseAmount = bondingCurve.getAmountOut(
+            token.totalSupply(),
+            contributionWithoutFee
+        );
+
+        uint256 bonusAmount = baseAmount * bonusMultiplier / 100;
+
+        token.mint(msg.sender, bonusAmount);
+
+        if (tokens[tokenAddress].collateralAmount >= tokens[tokenAddress].fundingGoal) {
+            token.mint(address(this), tokens[tokenAddress].initialSupply);
+            (
+                bytes32 poolId,
+                uint64 lpAmount,
+                bytes32 lpLockPositionNFTAccount
+            ) = _createPoolAndLockLP(
+                token,
+                tokens[tokenAddress].collateralAmount,
+                tokens[tokenAddress].initialSupply,
+                true
+            );
+
+            tokens[tokenAddress].state = TokenState.TRADING;
+            emit TokenLiqudityAdded(tokenAddress, poolId, lpAmount, lpLockPositionNFTAccount);
+        }
+    }
+
+// ... (the rest of the code is unchanged)
